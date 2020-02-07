@@ -29,6 +29,8 @@ vertically.
 
 Taps:
   -f filename [size]          display download speed [with progress bar]
+  -F filename [size]          display count in the file [with progress bar]
+  -d dirname [size]           display directory size [with progress bar]
   -r network-interface        display bytes received on network-interface
   -t network-interface        display bytes transmitted on network-interface
   -c                          start a new column for following tap arguments
@@ -590,6 +592,47 @@ def graphic_speed(speed):
     return speed_gfx[-1]
 
 
+def dir_size(start, follow_links=0, start_depth=0, max_depth=0, skip_errs=0):
+    try: 
+        dir_list = os.listdir(start)
+    except:
+        return 0
+        # If start is a directory, we probably have permission problems
+        if os.path.isdir(start):
+            raise DirSizeError('Cannot list directory %s'%start)
+        else:  # otherwise, just re-raise the error so that it propagates
+            raise
+
+    total = 0
+    for item in dir_list:
+        # Get statistics on each item--file and subdirectory--of start
+        path = os.path.join(start, item)    
+        try: 
+            stats = os.stat(path)
+        except: 
+            if not skip_errs:
+                raise DirSizeError('Cannot stat %s'%path)
+
+        # The size in bytes is in the seventh item of the stats tuple, so:
+        total += stats[6]
+
+        # recursive descent if warranted
+        if os.path.isdir(path) and (follow_links or not os.path.islink(path)):
+            bytes = dir_size(path, follow_links, start_depth+1, max_depth)
+            total += bytes
+            if max_depth and (start_depth < max_depth):
+                print_path(path, bytes)
+
+    return total
+
+def file_read(filename):
+    count = 0
+    try:
+        with open(filename) as f:
+            count = int(f.readline())
+    except:
+        pass
+    return count
 
 def file_size_feed(filename):
     """file_size_feed(filename) -> function that returns given file's size"""
@@ -816,12 +859,41 @@ def do_display(cols, urwid_ui, exit_on_complete, num_colors, shiny_colors):
     mg = MultiGraphDisplay(cols, urwid_ui, exit_on_complete, shiny_colors)
     mg.main(num_colors)
 
+class DirTap:
+    def __init__(self, name):
+        self.ftype = 'dir'
+        self.file_name = name
+        self.feed = lambda: dir_size(name, skip_errs=1)
+        self.wait = True
+
+    def set_expected_size(self, size):
+        self.expected_size = int(size)
+        self.ftype = 'dir_exp'
+
+    def report_zero(self):
+        self.wait = False
+
+    def description(self):
+        return "DIR: "+ self.file_name
+
+    def wait_creation(self):
+        if not self.wait:
+            return
+
+        if not os.path.exists(self.file_name):
+            sys.stdout.write("Waiting for '%s' to be created...\n"
+                % self.file_name)
+            while not os.path.exists(self.file_name):
+                time.sleep(1)
 
 class FileTap:
-    def __init__(self, name):
+    def __init__(self, name, op_read=False):
         self.ftype = 'file'
         self.file_name = name
-        self.feed = file_size_feed(name)
+        if op_read:
+            self.feed = lambda: file_read(name)
+        else:
+            self.feed = file_size_feed(name)
         self.wait = True
 
     def set_expected_size(self, size):
@@ -889,7 +961,7 @@ def parse_args():
         op = args[i]
         if op in ("-h","--help"):
             raise ArgumentError
-        elif op in ("-i","-r","-rx","-t","-tx","-f","-k","-m","-n"):
+        elif op in ("-i","-r","-rx","-t","-tx","-f","-k","-m","-n","-d","-F"):
             # combine two part arguments with the following argument
             try:
                 if op != "-f": # keep support for -f being optional
@@ -980,6 +1052,12 @@ def parse_args():
         elif op.startswith("-t"):
             push_tap(tap, taps)
             tap = NetworkTap("TX", op[2:])
+        elif op.startswith("-d"):
+            push_tap(tap, taps)
+            tap = DirTap(op[2:])
+        elif op.startswith("-F"):
+            push_tap(tap, taps)
+            tap = FileTap(op[2:], op_read=True)
         elif op == "-c":
             push_tap(tap, taps)
             if not taps:
